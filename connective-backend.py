@@ -261,6 +261,7 @@ class BeIdCard(BaseCard):
         # Card data
         self.__serialnr = None
         self.__appletversion = None
+        self._selected_file_id = None
         self.card_data = self.__get_card_data()
 
         if self.card_data:
@@ -351,6 +352,7 @@ class BeIdCard(BaseCard):
         request_data = [ 0x00, 0xA4, 0x08, 0x0C, len(bin_file_id) ] + bin_file_id
         data, sw1, sw2 = self._send_apdu(request_data)
         if sw1 == 0x90 and sw2 == 0x00:
+            self._selected_file_id = file_id
             return True
         else:
             return False
@@ -360,25 +362,41 @@ class BeIdCard(BaseCard):
         '''
         Read the contents of the selected file. select_file() should have been called before.
         '''
+        MAX_READ_RETRIES = 5
         file_contents = []
         offset = 0
         is_eof = False
         while not is_eof:
             request_data = [ 0x00, 0xB0, int(offset / 256), offset % 256, MAX_APDU_READ_LEN ]
             data, sw1, sw2 = self._send_apdu(request_data)
-            if sw1 == 0x90 and sw2 == 0x00:
+            if sw1 == 0x90 and sw2 == 0x00 and len(data) > 0:
                 file_contents.extend(data)
                 offset += len(data)
-            elif (sw1 == 0x6B and sw2 == 0x00) or (sw1 == 0x69 and sw2 == 0x86):
-                # offset beyond eof
-                is_eof = True
+                if len(data) < MAX_APDU_READ_LEN:
+                    is_eof = True
+            elif (sw1 == 0x6B and sw2 == 0x00) or (sw1 == 0x69 and sw2 == 0x86) \
+                    or (sw1 == 0x90 and sw2 == 0x00 and len(data) == 0):
+                recovered = False
+                for _ in range(MAX_READ_RETRIES):
+                    if self._selected_file_id is not None:
+                        self.select_file(self._selected_file_id)
+                    data, sw1, sw2 = self._send_apdu(request_data)
+                    if sw1 == 0x90 and sw2 == 0x00 and len(data) > 0:
+                        file_contents.extend(data)
+                        offset += len(data)
+                        if len(data) < MAX_APDU_READ_LEN:
+                            is_eof = True
+                        recovered = True
+                        break
+                    elif not ((sw1 == 0x6B and sw2 == 0x00) or (sw1 == 0x69 and sw2 == 0x86) \
+                            or (sw1 == 0x90 and sw2 == 0x00 and len(data) == 0)):
+                        break
+                if not recovered:
+                    is_eof = True
             else:
                 # general error
                 is_eof = True
                 file_contents = None
-
-            if len(data) < MAX_APDU_READ_LEN:
-                is_eof = True
         return file_contents
 
 
@@ -787,6 +805,7 @@ def compute_signature(request_reader, request_hash, key_selector):
         signature = None
         if is_authenticated:
             if request_hash and key_selector:
+                card_reader.select_coding_algorithm(key_selector)
                 signature = card_reader.sign(request_hash)
             ignore_result = card_reader.log_off()
 
